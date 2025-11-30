@@ -17,11 +17,23 @@ def main(commands):
         elif command[0:4] == 'type':
             str1 = command.removeprefix('type')
             str1 = str1.strip()
-            for cmd in commands:
-                    if str1 == cmd:
-                        print(f'{cmd} is a shell builtin')
-            if str1 not in commands:
-                 print(f'{str1}: not found')
+            
+            if str1 in commands:
+                print(f'{str1} is a shell builtin')
+            else:
+                # Cerca nel PATH
+                path = os.environ.get('PATH', '')
+                directories = path.split(':')
+                found = False
+                for directory in directories:
+                    full_path = os.path.join(directory, str1)
+                    if os.path.isfile(full_path) and os.access(full_path, os.X_OK):
+                        print(f'{str1} is in {full_path}')
+                        found = True
+                        break
+                if not found:
+                    print(f'{str1}: not found')
+            
          
         else:
             path = os.environ.get('PATH','')
@@ -35,7 +47,8 @@ def main(commands):
                       subprocess.run([full_path]+ cmd_parts[1:])
                       found = True
                       break
-            print(f"{command}: command not found")
+            if not found:
+                print(f"{command}: command not found")
         pass
         
 
