@@ -17,10 +17,11 @@ def main(commands):
             for cmd in commands:
                     if str1 == cmd:
                         print(f'{cmd} is a shell builtin')
-            print(f'{str1}: not found')
+            if str1 not in commands:
+                 print(f'{str1}: not found')
                 
         else:
-            print(f"{command}: not found")
+            print(f"{command}: command not found")
         pass
 
 
