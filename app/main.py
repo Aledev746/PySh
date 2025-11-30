@@ -1,7 +1,7 @@
 import sys
 
-
-def main():
+commands = ['exit','echo','type']
+def main(commands):
     while True:
         sys.stdout.write("$ ")
         command = input()
@@ -12,14 +12,17 @@ def main():
              stringa = stringa.strip()
              print(stringa)
         elif command[0:4] == 'type':
-             str1 = command.removeprefix('type')
-             str1 = str1.strip()
-             if str1 == 'echo' or str1 == 'exit' or str1 == 'type':
-                  print(f'{str1} is a shell builtin')
+            str1 = command.removeprefix('type')
+            str1 = str1.strip()
+            for cmd in commands:
+                    if str1 == cmd:
+                        print(f'{cmd} is a shell builtin')
+            print(f'{str1}: not found')
+                
         else:
             print(f"{command}: not found")
         pass
 
 
 if __name__ == "__main__":
-        main()
+        main(commands)
