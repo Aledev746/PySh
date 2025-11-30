@@ -28,7 +28,7 @@ def main(commands):
                 for directory in directories:
                     full_path = os.path.join(directory, str1)
                     if os.path.isfile(full_path) and os.access(full_path, os.X_OK):
-                        print(f'{str1} is  {full_path}')
+                        print(f'{str1} is {full_path}')
                         found = True
                         break
                 if not found:
