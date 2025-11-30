@@ -11,8 +11,12 @@ def main():
              stringa = command.removeprefix('echo')
              stringa = stringa.strip()
              print(stringa)
+        elif command[0:4] == 'type':
+             str1 = command.removeprefix('type')
+             str1 = str1.strip()
+             print(f'{str1} is a shell builtin')
         else:
-            print(f"{command}: command not found")
+            print(f"{command}: not found")
         pass
 
 
