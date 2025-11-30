@@ -7,7 +7,12 @@ def main():
         command = input()
         if command == 'exit':
              break
-        print(f"{command}: command not found")
+        elif command[0:4] == 'echo':
+             stringa = command.removeprefix('echo')
+             stringa = stringa.strip()
+             print(stringa)
+        else:
+            print(f"{command}: command not found")
         pass
 
 
