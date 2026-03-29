@@ -1,34 +1,66 @@
-[![progress-banner](https://backend.codecrafters.io/progress/shell/7c6c3fd8-21e2-4bb0-b7e9-94eb92420aa3)](https://app.codecrafters.io/users/codecrafters-bot?r=2qF)
+# 🐍 PySh (Python Shell)
 
-This is a starting point for Python solutions to the
-["Build Your Own Shell" Challenge](https://app.codecrafters.io/courses/shell/overview).
+[![CodeCrafters Challenge](https://img.shields.io/badge/CodeCrafters-Build_Your_Own_Shell-blue?logo=github)](https://app.codecrafters.io/courses/shell/overview)
+[![Language](https://img.shields.io/badge/Language-Python_3.x-yellow?logo=python&logoColor=white)](https://www.python.org/)
 
-In this challenge, you'll build your own POSIX compliant shell that's capable of
-interpreting shell commands, running external programs and builtin commands like
-cd, pwd, echo and more. Along the way, you'll learn about shell command parsing,
-REPLs, builtin commands, and more.
+**PySh** is a lightweight, POSIX-compliant shell written entirely in Python. Originally started as part of the [CodeCrafters "Build Your Own Shell" Challenge](https://app.codecrafters.io/courses/shell/overview), this project serves as an educational deep dive into the inner workings of command-line interpreters. It demonstrates core shell functionalities from managing a Read-Eval-Print Loop (REPL) to argument parsing and system process execution.
 
-**Note**: If you're viewing this repo on GitHub, head over to
-[codecrafters.io](https://codecrafters.io) to try the challenge.
+---
 
-# Passing the first stage
+## ✨ Key Features
 
-The entry point for your `shell` implementation is in `app/main.py`. Study and
-uncomment the relevant code, and push your changes to pass the first stage:
+- **REPL (Read-Eval-Print Loop)**: An interactive command-line interface with a custom `$` prompt.
+- **Built-in Commands**:
+  - `echo`: Prints text and arguments to the standard output.
+  - `exit`: Terminates the shell session gracefully.
+  - `type`: Identifies whether a command is a shell built-in or an executable located within the system's `$PATH`.
+- **Execution Engine**: Discovers and executes external programs by dynamically searching the directories specified in the `$PATH` environment variable.
+- **Output Redirection**: Foundational logic for redirecting standard output using the `>` operator (currently under active development).
+- **Graceful Error Handling**: Detects and reports unrecognizable commands or missing executables.
 
-```sh
-git commit -am "pass 1st stage" # any msg
-git push origin master
+---
+
+## 🚀 Getting Started
+
+### Prerequisites
+Ensure you have the following installed on your system:
+- [Python 3.x](https://www.python.org/)
+- [uv](https://github.com/astral-sh/uv) (Optional, for dependency management)
+
+### Running the Shell
+To launch the interactive PySh environment, you can run the provided runner script:
+
+```bash
+./your_program.sh
 ```
 
-Time to move on to the next stage!
+Alternatively, you can execute the Python module directly:
 
-# Stage 2 & beyond
+```bash
+python3 -m app.main
+```
 
-Note: This section is for stages 2 and beyond.
+---
 
-1. Ensure you have `uv` installed locally
-1. Run `./your_program.sh` to run your program, which is implemented in
-   `app/main.py`.
-1. Commit your changes and run `git push origin master` to submit your solution
-   to CodeCrafters. Test output will be streamed to your terminal.
+## 🛠️ Architecture Overview
+
+- `app/main.py`: The core engine of the shell. It manages the infinite event loop, reads user input, and routes commands to their respective handlers.
+- **Command Parsing**: Includes rudimentary parsing logic to split input strings, handling command names, arguments, and special operators.
+- **Subprocess Management**: Leverages Python's built-in `subprocess` and `os` modules to fork processes and execute system-level binaries directly.
+
+---
+
+## 🏗️ Future Roadmap
+
+- [ ] Complete implementation of output redirection operators (`>`, `>>`, `2>`).
+- [ ] Environment variable management and expansion (e.g., `echo $USER`).
+- [ ] Command history tracking (up/down arrow keys).
+- [ ] Press `Tab` for command autocompletion.
+- [ ] Support for command pipelines (`|`).
+- [ ] Implementation of `cd` and `pwd` built-in commands for directory navigation.
+
+---
+
+## 🤝 Contributing
+
+This project is a personal implementation of the [CodeCrafters Challenge](https://codecrafters.io). While it is primarily an educational undertaking, suggestions, forks, and code reviews are entirely welcome! Feel free to explore the codebase and propose enhancements.
