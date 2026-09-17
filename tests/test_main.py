@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from io import StringIO
 
-from app.main import execute_builtin, lex, parse, run_command
+from app.main import JOBS, execute_builtin, lex, parse, parse_job, run_command, wait_builtin
 
 
 class LexerTests(unittest.TestCase):
@@ -11,11 +11,16 @@ class LexerTests(unittest.TestCase):
         os.environ["PYSH_TEST_VALUE"] = "hello world"
         self.assertEqual(
             lex("""echo '$PYSH_TEST_VALUE' "$PYSH_TEST_VALUE" $PYSH_TEST_VALUE"""),
-            ["echo", "$PYSH_TEST_VALUE", "hello world", "hello world"],
+            ["echo", "$PYSH_TEST_VALUE", "hello world", "hello", "world"],
         )
 
     def test_operators_without_spaces(self):
         self.assertEqual(lex("echo hi>out|cat"), ["echo", "hi", ">", "out", "|", "cat"])
+
+    def test_default_parameter_and_tilde_expansion(self):
+        os.environ.pop("PYSH_MISSING_VALUE", None)
+        self.assertEqual(lex("echo ${PYSH_MISSING_VALUE:-fallback}"), ["echo", "fallback"])
+        self.assertEqual(lex("echo ~/project")[0:2], ["echo", os.path.expanduser("~") + "/project"])
 
 
 class ParserTests(unittest.TestCase):
@@ -27,6 +32,11 @@ class ParserTests(unittest.TestCase):
     def test_syntax_error(self):
         with self.assertRaises(ValueError):
             parse("echo |")
+
+    def test_background_marker(self):
+        commands, background = parse_job("sleep 0.01 &")
+        self.assertTrue(background)
+        self.assertEqual(commands[0].argv, ["sleep", "0.01"])
 
 
 class BuiltinTests(unittest.TestCase):
@@ -45,6 +55,14 @@ class BuiltinTests(unittest.TestCase):
     def test_pipeline(self):
         status = run_command(parse("printf hello | tr a-z A-Z"))
         self.assertEqual(status, 0)
+
+    def test_background_job_can_be_waited(self):
+        commands, background = parse_job("sleep 0.01 &")
+        self.assertTrue(background)
+        self.assertEqual(run_command(commands, "sleep 0.01 &", background), 0)
+        self.assertTrue(JOBS)
+        self.assertEqual(wait_builtin([], StringIO()), 0)
+        self.assertFalse(JOBS)
 
 
 if __name__ == "__main__":
