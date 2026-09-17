@@ -22,6 +22,17 @@ class LexerTests(unittest.TestCase):
         self.assertEqual(lex("echo ${PYSH_MISSING_VALUE:-fallback}"), ["echo", "fallback"])
         self.assertEqual(lex("echo ~/project")[0:2], ["echo", os.path.expanduser("~") + "/project"])
 
+    def test_pathname_expansion(self):
+        original = os.getcwd()
+        with tempfile.TemporaryDirectory() as directory:
+            open(os.path.join(directory, "alpha.txt"), "w").close()
+            open(os.path.join(directory, "beta.py"), "w").close()
+            os.chdir(directory)
+            try:
+                self.assertEqual(lex("echo *.txt"), ["echo", "alpha.txt"])
+            finally:
+                os.chdir(original)
+
 
 class ParserTests(unittest.TestCase):
     def test_pipeline_and_redirects(self):
