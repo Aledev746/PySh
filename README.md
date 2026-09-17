@@ -16,6 +16,8 @@ The project favors clear control flow and the Python standard library over featu
 - External command lookup through `PATH` with meaningful exit statuses.
 - Input, output, append, and stderr redirection.
 - Multi-process pipelines connected with `|`.
+- Persistent command history and readline tab completion, with a safe non-readline fallback.
+- Background jobs with `&`, process groups, `jobs`, `fg`, `bg`, and `wait`.
 - Standard-library unit tests for parsing and execution behavior.
 
 ## Supported commands
@@ -30,6 +32,10 @@ The project favors clear control flow and the Python standard library over featu
 | `unset NAME...` | Remove environment variables. |
 | `help` | List the available built-ins. |
 | `exit [status]` | Leave the shell with an optional status code. |
+| `jobs` | List active, stopped, and completed jobs. |
+| `fg [job]` | Bring a job to the foreground and wait for it. |
+| `bg [job]` | Resume a stopped job in the background. |
+| `wait [job...]` | Wait for one or more background jobs. |
 
 ## Quick start
 
@@ -71,19 +77,25 @@ saved
 $ export PROJECT=PySh
 $ echo "Working on $PROJECT"
 Working on PySh
+$ sleep 30 &
+[1] 4242
+$ jobs
+[1] Running sleep 30 &
+$ fg %1
 ```
 
-Supported redirection operators are `<`, `>`, `>>`, `2>`, and `2>>` (spaces around the operator are optional). The shell also supports `$?` for the previous command's exit status.
+Supported redirection operators are `<`, `>`, `>>`, `2>`, and `2>>` (spaces around the operator are optional). The shell also supports `$?` for the previous command's exit status, `${NAME:-default}` parameter defaults, tilde expansion, unquoted field splitting, and pathname expansion.
 
 ## How it works
 
 PySh keeps the execution path deliberately visible:
 
-1. `lex` tokenizes a command line, removes quotes, handles escapes, and expands variables.
-2. `parse` converts tokens into simple commands, redirections, and pipeline stages.
+1. `lex` tokenizes a command line, removes quotes, handles escapes, performs parameter expansion, field splitting, and pathname expansion.
+2. `parse` converts tokens into simple commands, redirections, pipeline stages, and background jobs.
 3. Built-ins that change shell state run in the parent process; other commands run in child processes.
-4. `run_pipeline` connects child processes with Unix pipes and applies redirections with `dup2`.
-5. External programs are resolved with `PATH` and started with `os.execvpe`.
+4. `run_pipeline` connects child processes with Unix pipes, creates process groups, and applies redirections with `dup2`.
+5. External programs are resolved with `PATH` and started with `os.execvpe`; background jobs are tracked and reaped without blocking the prompt.
+6. When available, Python `readline` supplies persistent history and command/path completion.
 
 ### Project layout
 
@@ -112,9 +124,9 @@ The tests cover quoting and expansion, operator parsing, syntax errors, built-in
 - [x] Quoting, escaping, comments, and variable expansion
 - [x] Input/output/stderr redirection
 - [x] Pipelines
-- [ ] Portable command history and tab completion
-- [ ] Background jobs and job control
-- [ ] More complete POSIX word splitting and expansion rules
+- [x] Portable command history and tab completion
+- [x] Background jobs and basic job control
+- [x] More complete POSIX word splitting and expansion rules
 
 ## Contributing
 
