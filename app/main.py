@@ -8,12 +8,21 @@ documented by this project and the CodeCrafters shell stages.
 
 from __future__ import annotations
 
+import atexit
+import glob
 import os
 import re
+import signal
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from shutil import which
 from typing import TextIO
+
+try:
+    import readline
+except ImportError:  # pragma: no cover - readline is platform dependent.
+    readline = None
 
 
 BUILTINS = {
@@ -22,12 +31,19 @@ BUILTINS = {
     "exit",
     "export",
     "help",
+    "jobs",
+    "fg",
+    "bg",
+    "wait",
     "pwd",
     "type",
     "unset",
 }
 
 VARIABLE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+IFS_PATTERN = re.compile(r"[ \t\n]+")
+HISTORY_LIMIT = 1000
+LAST_BACKGROUND_PID = 0
 
 
 class ShellSyntaxError(ValueError):
@@ -54,51 +70,88 @@ class SimpleCommand:
     redirects: list[Redirect]
 
 
+@dataclass
+class Job:
+    job_id: int
+    pids: list[int]
+    pgid: int
+    command: str
+    state: str = "Running"
+    statuses: dict[int, int] | None = None
+    notified: bool = False
+
+    def __post_init__(self) -> None:
+        if self.statuses is None:
+            self.statuses = {}
+
+
+JOBS: dict[int, Job] = {}
+NEXT_JOB_ID = 1
+
+
+def _expand_parameter_at(text: str, index: int, last_status: int) -> tuple[str, int]:
+    """Expand one parameter beginning at ``index`` and return value/new index."""
+
+    global LAST_BACKGROUND_PID
+
+    if index + 1 >= len(text):
+        return "$", index + 1
+
+    marker = text[index + 1]
+    if marker == "?":
+        return str(last_status), index + 2
+    if marker == "$":
+        return str(os.getpid()), index + 2
+    if marker == "!":
+        return str(LAST_BACKGROUND_PID), index + 2
+    if marker == "#":
+        return "0", index + 2
+    if marker == "0":
+        return sys.argv[0], index + 2
+
+    if marker == "{":
+        closing = text.find("}", index + 2)
+        if closing == -1:
+            return "$", index + 1
+        expression = text[index + 2 : closing]
+        match = re.fullmatch(
+            r"([A-Za-z_][A-Za-z0-9_]*)(?:(:-|:=|-|\+|:\+)(.*))?",
+            expression,
+        )
+        if not match:
+            return "", closing + 1
+        name, operator, alternate = match.groups()
+        value = os.environ.get(name)
+        is_set = value is not None
+        is_non_empty = bool(value)
+        alternate_value = expand_variables(alternate or "", last_status)
+        if operator in (":-", "-") and (not is_set or (operator == ":-" and not is_non_empty)):
+            return alternate_value, closing + 1
+        if operator in (":+", "+") and (is_set and (operator == "+" or is_non_empty)):
+            return alternate_value, closing + 1
+        if operator in (":=", "=") and (not is_set or (operator == ":=" and not is_non_empty)):
+            os.environ[name] = alternate_value
+            return alternate_value, closing + 1
+        return value or "", closing + 1
+
+    match = VARIABLE_NAME.match(text, index + 1)
+    if match:
+        return os.environ.get(match.group(0), ""), match.end()
+    return "$", index + 1
+
+
 def expand_variables(text: str, last_status: int) -> str:
-    """Expand the small, useful subset of shell parameters supported by PySh."""
+    """Expand parameters, including POSIX-style default operators."""
 
     result: list[str] = []
     index = 0
     while index < len(text):
-        if text[index] != "$":
+        if text[index] == "$":
+            value, index = _expand_parameter_at(text, index, last_status)
+            result.append(value)
+        else:
             result.append(text[index])
             index += 1
-            continue
-
-        if index + 1 >= len(text):
-            result.append("$")
-            index += 1
-            continue
-
-        if text[index + 1] == "?":
-            result.append(str(last_status))
-            index += 2
-            continue
-
-        if text[index + 1] == "$":
-            result.append(str(os.getpid()))
-            index += 2
-            continue
-
-        if text[index + 1] == "{":
-            closing = text.find("}", index + 2)
-            if closing == -1:
-                result.append("$")
-                index += 1
-                continue
-            name = text[index + 2 : closing]
-            result.append(os.environ.get(name, "") if VARIABLE_NAME.fullmatch(name) else "")
-            index = closing + 1
-            continue
-
-        match = VARIABLE_NAME.match(text, index + 1)
-        if match:
-            result.append(os.environ.get(match.group(0), ""))
-            index = match.end()
-        else:
-            result.append("$")
-            index += 1
-
     return "".join(result)
 
 
@@ -112,15 +165,38 @@ def lex(line: str, last_status: int = 0) -> list[str]:
     tokens: list[str] = []
     current: list[str] = []
     token_started = False
+    glob_active = False
     index = 0
     quote: str | None = None
 
     def flush() -> None:
-        nonlocal token_started
+        nonlocal glob_active, token_started
         if token_started:
-            tokens.append("".join(current))
+            word = "".join(current)
+            matches = sorted(glob.glob(word)) if glob_active and glob.has_magic(word) else []
+            tokens.extend(matches or [word])
             current.clear()
+            glob_active = False
             token_started = False
+
+    def append_literal(value: str, allow_glob: bool = False) -> None:
+        nonlocal glob_active, token_started
+        current.extend(value)
+        token_started = True
+        if allow_glob and glob.has_magic(value):
+            glob_active = True
+
+    def append_expansion(value: str, quoted: bool) -> None:
+        if quoted:
+            append_literal(value)
+            return
+        fields = [field for field in IFS_PATTERN.split(value) if field]
+        if not fields:
+            return
+        append_literal(fields[0])
+        for field in fields[1:]:
+            flush()
+            append_literal(field)
 
     while index < len(line):
         char = line[index]
@@ -129,8 +205,7 @@ def lex(line: str, last_status: int = 0) -> list[str]:
             if char == "'":
                 quote = None
             else:
-                current.append(char)
-            token_started = True
+                append_literal(char)
             index += 1
             continue
 
@@ -140,20 +215,14 @@ def lex(line: str, last_status: int = 0) -> list[str]:
                 index += 1
                 continue
             if char == "\\" and index + 1 < len(line) and line[index + 1] in '\\"$':
-                current.append(line[index + 1])
-                token_started = True
+                append_literal(line[index + 1])
                 index += 2
                 continue
             if char == "$":
-                start = index
-                index += 1
-                while index < len(line) and (line[index].isalnum() or line[index] in "_?{}"):
-                    index += 1
-                current.append(expand_variables(line[start:index], last_status))
-                token_started = True
+                value, index = _expand_parameter_at(line, index, last_status)
+                append_expansion(value, quoted=True)
                 continue
-            current.append(char)
-            token_started = True
+            append_literal(char)
             index += 1
             continue
 
@@ -173,18 +242,21 @@ def lex(line: str, last_status: int = 0) -> list[str]:
             continue
         if char == "\\":
             if index + 1 < len(line):
-                current.append(line[index + 1])
-                token_started = True
+                append_literal(line[index + 1])
                 index += 2
             else:
-                current.append("\\")
-                token_started = True
+                append_literal("\\")
                 index += 1
             continue
         if char == "#":
             if not token_started:
                 break
-            current.append(char)
+            append_literal(char)
+            index += 1
+            continue
+
+        if char == "~" and not token_started and (index + 1 == len(line) or line[index + 1] == "/"):
+            append_literal(os.environ.get("HOME", "~"))
             index += 1
             continue
 
@@ -207,29 +279,17 @@ def lex(line: str, last_status: int = 0) -> list[str]:
                 tokens.append(">")
                 index += 1
             continue
-        if char in "|<":
+        if char in "|<&":
             flush()
             tokens.append(char)
             index += 1
             continue
         if char == "$":
-            start = index
-            index += 1
-            if index < len(line) and line[index] == "{":
-                end = line.find("}", index + 1)
-                index = len(line) if end == -1 else end + 1
-            elif index < len(line) and line[index] in "?$":
-                index += 1
-            else:
-                match = VARIABLE_NAME.match(line, index)
-                if match:
-                    index = match.end()
-            current.append(expand_variables(line[start:index], last_status))
-            token_started = True
+            value, index = _expand_parameter_at(line, index, last_status)
+            append_expansion(value, quoted=False)
             continue
 
-        current.append(char)
-        token_started = True
+        append_literal(char, allow_glob=char in "*?[")
         index += 1
 
     if quote is not None:
@@ -238,12 +298,20 @@ def lex(line: str, last_status: int = 0) -> list[str]:
     return tokens
 
 
-def parse(line: str, last_status: int = 0) -> list[SimpleCommand]:
-    """Parse one line into a pipeline of simple commands."""
+def parse_job(line: str, last_status: int = 0) -> tuple[list[SimpleCommand], bool]:
+    """Parse one line and return its pipeline plus background flag."""
 
     tokens = lex(line, last_status)
     if not tokens:
-        return []
+        return [], False
+
+    background = tokens[-1] == "&"
+    if background:
+        tokens.pop()
+        if not tokens:
+            raise ShellSyntaxError("missing command before &")
+    elif "&" in tokens:
+        raise ShellSyntaxError("unexpected '&'")
 
     pipeline: list[SimpleCommand] = []
     command = SimpleCommand(argv=[], redirects=[])
@@ -278,7 +346,18 @@ def parse(line: str, last_status: int = 0) -> list[SimpleCommand]:
     if not command.argv:
         raise ShellSyntaxError("empty command in pipeline")
     pipeline.append(command)
-    return pipeline
+    return pipeline, background
+
+
+def parse(line: str, last_status: int = 0) -> list[SimpleCommand]:
+    """Parse one line into a pipeline of simple commands.
+
+    Kept as a small compatibility wrapper for callers that only need the
+    foreground pipeline.
+    """
+
+    commands, _ = parse_job(line, last_status)
+    return commands
 
 
 def command_path(name: str) -> str | None:
@@ -380,6 +459,18 @@ def execute_builtin(argv: list[str], out: TextIO, err: TextIO) -> int:
             os.environ.pop(variable, None)
         return status
 
+    if name == "jobs":
+        return jobs_builtin(out)
+
+    if name == "fg":
+        return foreground_builtin(args, out, err)
+
+    if name == "bg":
+        return background_builtin(args, err)
+
+    if name == "wait":
+        return wait_builtin(args, err)
+
     if name == "help":
         print("Builtins: " + ", ".join(sorted(BUILTINS)), file=out)
         return 0
@@ -423,11 +514,155 @@ def run_builtin_parent(command: SimpleCommand) -> int:
             os.close(original)
 
 
-def run_pipeline(commands: list[SimpleCommand]) -> int:
-    """Fork a process for each command and return the last status."""
+def _status_from_wait(raw_status: int) -> int:
+    if os.WIFEXITED(raw_status):
+        return os.WEXITSTATUS(raw_status)
+    if os.WIFSIGNALED(raw_status):
+        return 128 + os.WTERMSIG(raw_status)
+    return 1
+
+
+def _reap_job(job: Job) -> None:
+    """Collect any available child status without blocking."""
+
+    assert job.statuses is not None
+    for pid in job.pids:
+        if pid in job.statuses:
+            continue
+        try:
+            waited_pid, raw_status = os.waitpid(pid, os.WNOHANG | os.WUNTRACED | os.WCONTINUED)
+        except ChildProcessError:
+            job.statuses[pid] = 0
+            continue
+        if waited_pid == 0:
+            continue
+        if os.WIFSTOPPED(raw_status):
+            job.state = "Stopped"
+        elif os.WIFCONTINUED(raw_status):
+            job.state = "Running"
+        else:
+            job.statuses[pid] = _status_from_wait(raw_status)
+
+    if len(job.statuses) == len(job.pids):
+        job.state = "Done"
+
+
+def reap_jobs(announce: bool = False) -> None:
+    for job in JOBS.values():
+        previous_state = job.state
+        _reap_job(job)
+        if announce and previous_state == "Running" and job.state == "Done" and not job.notified:
+            print(f"\n[{job.job_id}] Done {job.command}")
+            job.notified = True
+
+
+def _wait_for_job(job: Job) -> int:
+    """Wait for every process in a job and return the last process status."""
+
+    assert job.statuses is not None
+    for pid in job.pids:
+        if pid in job.statuses:
+            continue
+        while True:
+            try:
+                waited_pid, raw_status = os.waitpid(pid, os.WUNTRACED)
+            except ChildProcessError:
+                job.statuses[pid] = 0
+                break
+            if waited_pid != pid:
+                continue
+            if os.WIFSTOPPED(raw_status):
+                job.state = "Stopped"
+                break
+            job.statuses[pid] = _status_from_wait(raw_status)
+            break
+    if len(job.statuses) == len(job.pids):
+        job.state = "Done"
+    return job.statuses.get(job.pids[-1], 1)
+
+
+def _job_from_argument(args: list[str], err: TextIO) -> Job | None:
+    if not JOBS:
+        print("pysh: no current jobs", file=err)
+        return None
+    if not args:
+        return JOBS[sorted(JOBS)[-1]]
+    value = args[0][1:] if args[0].startswith("%") else args[0]
+    try:
+        job_id = int(value)
+    except ValueError:
+        print(f"pysh: {args[0]}: invalid job", file=err)
+        return None
+    job = JOBS.get(job_id)
+    if job is None:
+        print(f"pysh: {args[0]}: no such job", file=err)
+    return job
+
+
+def jobs_builtin(out: TextIO) -> int:
+    reap_jobs()
+    for job_id in sorted(JOBS):
+        job = JOBS[job_id]
+        print(f"[{job.job_id}] {job.state:<7} {job.command}", file=out)
+    return 0
+
+
+def foreground_builtin(args: list[str], out: TextIO, err: TextIO) -> int:
+    job = _job_from_argument(args, err)
+    if job is None:
+        return 1
+    if job.state == "Done":
+        return job.statuses.get(job.pids[-1], 0) if job.statuses else 0
+    try:
+        if job.state == "Stopped":
+            os.killpg(job.pgid, signal.SIGCONT)
+            job.state = "Running"
+    except ProcessLookupError:
+        pass
+    print(job.command, file=out)
+    status = _wait_for_job(job)
+    if job.state == "Done":
+        JOBS.pop(job.job_id, None)
+    return status
+
+
+def background_builtin(args: list[str], err: TextIO) -> int:
+    job = _job_from_argument(args, err)
+    if job is None:
+        return 1
+    if job.state == "Done":
+        return job.statuses.get(job.pids[-1], 0) if job.statuses else 0
+    try:
+        os.killpg(job.pgid, signal.SIGCONT)
+        job.state = "Running"
+        job.notified = False
+        print(f"[{job.job_id}] {job.command}")
+        return 0
+    except ProcessLookupError:
+        print(f"pysh: job {job.job_id} is no longer running", file=err)
+        return 1
+
+
+def wait_builtin(args: list[str], err: TextIO) -> int:
+    if args:
+        jobs = [_job_from_argument([argument], err) for argument in args]
+        jobs = [job for job in jobs if job is not None]
+    else:
+        jobs = list(JOBS.values())
+    status = 0
+    for job in jobs:
+        status = _wait_for_job(job)
+        if job.state == "Done":
+            JOBS.pop(job.job_id, None)
+    return status
+
+
+def _spawn_pipeline(commands: list[SimpleCommand]) -> tuple[list[int], int]:
+    """Fork a pipeline and return its child PIDs and process group ID."""
 
     children: list[int] = []
     previous_read: int | None = None
+    pgid: int | None = None
 
     for index, command in enumerate(commands):
         next_read: int | None = None
@@ -438,6 +673,7 @@ def run_pipeline(commands: list[SimpleCommand]) -> int:
         pid = os.fork()
         if pid == 0:
             try:
+                os.setpgid(0, pgid or 0)
                 if previous_read is not None:
                     os.dup2(previous_read, 0)
                 if next_write is not None:
@@ -472,6 +708,12 @@ def run_pipeline(commands: list[SimpleCommand]) -> int:
             os._exit(status & 0xFF)
 
         children.append(pid)
+        if pgid is None:
+            pgid = pid
+        try:
+            os.setpgid(pid, pgid)
+        except OSError:
+            pass
         if previous_read is not None:
             os.close(previous_read)
         if next_write is not None:
@@ -480,30 +722,136 @@ def run_pipeline(commands: list[SimpleCommand]) -> int:
 
     if previous_read is not None:
         os.close(previous_read)
-
-    statuses: list[int] = []
-    for child in children:
-        _, status = os.waitpid(child, 0)
-        if os.WIFEXITED(status):
-            statuses.append(os.WEXITSTATUS(status))
-        elif os.WIFSIGNALED(status):
-            statuses.append(128 + os.WTERMSIG(status))
-        else:
-            statuses.append(1)
-    return statuses[-1] if statuses else 0
+    return children, pgid or 0
 
 
-def run_command(commands: list[SimpleCommand]) -> int:
+def run_pipeline(
+    commands: list[SimpleCommand],
+    command_text: str = "",
+    background: bool = False,
+) -> int:
+    """Run a pipeline in the foreground or register it as a background job."""
+
+    global LAST_BACKGROUND_PID, NEXT_JOB_ID
+    children, pgid = _spawn_pipeline(commands)
+    if background:
+        job_id = NEXT_JOB_ID
+        NEXT_JOB_ID += 1
+        JOBS[job_id] = Job(job_id, children, pgid, command_text or commands[0].argv[0])
+        LAST_BACKGROUND_PID = children[-1]
+        print(f"[{job_id}] {children[-1]}")
+        return 0
+
+    job = Job(0, children, pgid, command_text)
+    return _wait_for_job(job)
+
+def run_command(
+    commands: list[SimpleCommand],
+    command_text: str = "",
+    background: bool = False,
+) -> int:
     if not commands:
         return 0
-    if len(commands) == 1 and commands[0].argv[0] in {"cd", "export", "unset"}:
+    parent_builtins = {"cd", "export", "unset", "jobs", "fg", "bg", "wait"}
+    if not background and len(commands) == 1 and commands[0].argv[0] in parent_builtins:
         return run_builtin_parent(commands[0])
-    return run_pipeline(commands)
+    return run_pipeline(commands, command_text, background)
+
+
+_completion_matches: list[str] = []
+_completion_prefix = ""
+
+
+def _completion_candidates(text: str, line: str, begin: int) -> list[str]:
+    if begin == 0 or not line[:begin].strip():
+        candidates = set(BUILTINS)
+        for directory in os.environ.get("PATH", "").split(os.pathsep):
+            if not directory:
+                directory = "."
+            try:
+                candidates.update(
+                    entry.name
+                    for entry in Path(directory).iterdir()
+                    if entry.is_file() and os.access(entry, os.X_OK)
+                )
+            except OSError:
+                continue
+        return sorted(candidate for candidate in candidates if candidate.startswith(text))
+
+    expanded = os.path.expanduser(text)
+    directory, prefix = os.path.split(expanded)
+    directory = directory or "."
+    try:
+        entries = sorted(Path(directory).iterdir())
+    except OSError:
+        return []
+    matches: list[str] = []
+    for entry in entries:
+        if not entry.name.startswith(prefix):
+            continue
+        candidate = str(Path(directory, entry.name))
+        if entry.is_dir():
+            candidate += "/"
+        if text.startswith("~"):
+            home = str(Path.home())
+            candidate = candidate.replace(home, "~", 1)
+        matches.append(candidate)
+    return matches
+
+
+def complete(text: str, state: int) -> str | None:
+    """Readline callback for commands and filesystem paths."""
+
+    global _completion_matches, _completion_prefix
+    if readline is None:
+        return None
+    line = readline.get_line_buffer()
+    begin = readline.get_begidx()
+    if state == 0 or text != _completion_prefix:
+        _completion_prefix = text
+        _completion_matches = _completion_candidates(text, line, begin)
+    return _completion_matches[state] if state < len(_completion_matches) else None
+
+
+def configure_line_editor() -> None:
+    """Enable persistent history and tab completion when readline is present."""
+
+    if readline is None or not sys.stdin.isatty():
+        return
+    history_path = Path(os.environ.get("PYSH_HISTORY_FILE", Path.home() / ".pysh_history"))
+    try:
+        readline.read_history_file(str(history_path))
+    except OSError:
+        pass
+    readline.set_history_length(HISTORY_LIMIT)
+    readline.set_completer(complete)
+    readline.parse_and_bind("tab: complete")
+
+    def save_history() -> None:
+        try:
+            history_path.parent.mkdir(parents=True, exist_ok=True)
+            readline.write_history_file(str(history_path))
+        except OSError:
+            pass
+
+    atexit.register(save_history)
+
+
+def configure_job_control() -> None:
+    """Keep the interactive shell alive while jobs are stopped or resumed."""
+
+    if not sys.stdin.isatty():
+        return
+    for signum in (signal.SIGTSTP, signal.SIGTTIN, signal.SIGTTOU):
+        signal.signal(signum, signal.SIG_IGN)
 
 
 def main() -> int:
     last_status = 0
+    configure_line_editor()
+    configure_job_control()
     while True:
+        reap_jobs(announce=True)
         try:
             sys.stdout.write("$ ")
             sys.stdout.flush()
@@ -517,8 +865,10 @@ def main() -> int:
             continue
 
         try:
-            commands = parse(line, last_status)
-            last_status = run_command(commands)
+            if readline is not None and sys.stdin.isatty() and line.strip():
+                readline.add_history(line)
+            commands, background = parse_job(line, last_status)
+            last_status = run_command(commands, line, background)
         except ShellSyntaxError as exc:
             print(f"pysh: syntax error: {exc}", file=sys.stderr)
             last_status = 2
