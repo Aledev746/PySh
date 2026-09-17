@@ -59,7 +59,7 @@ Once PySh is running, try:
 
 ```console
 $ pwd
-/home/alessandro/PySh
+/home/user/PySh
 $ echo "hello from PySh"
 hello from PySh
 $ printf 'hello\nworld\n' | tr a-z A-Z
@@ -73,7 +73,7 @@ $ echo "Working on $PROJECT"
 Working on PySh
 ```
 
-Supported redirection operators are ` < `, ` > `, ` >> `, ` 2> `, and ` 2>> ` (spaces around the operator are optional). The shell also supports `$?` for the previous command's exit status.
+Supported redirection operators are `<`, `>`, `>>`, `2>`, and `2>>` (spaces around the operator are optional). The shell also supports `$?` for the previous command's exit status.
 
 ## How it works
 
